@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
 )
 
@@ -33,6 +34,14 @@ func NewManager(userDataDir string) (*Manager, error) {
 		Args: []string{
 			"--disable-web-security",
 			"--disable-features=VizDisplayCompositor",
+			// 反检测参数
+			"--disable-blink-features=AutomationControlled",
+			"--disable-dev-shm-usage",
+			"--no-first-run",
+			"--no-default-browser-check",
+			"--disable-extensions-file-access-check",
+			"--disable-extensions",
+			"--disable-plugins",
 		},
 	})
 	if err != nil {
@@ -43,7 +52,24 @@ func NewManager(userDataDir string) (*Manager, error) {
 	// 创建持久化的浏览器上下文
 	stateFile := filepath.Join(userDataDir, "state.json")
 	contextOptions := playwright.BrowserNewContextOptions{
-		UserAgent: playwright.String("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		// 使用真实的User-Agent，模拟最新版本Chrome
+		UserAgent: playwright.String("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.234 Safari/537.36"),
+		// 设置真实的viewport
+		Viewport: &playwright.Size{
+			Width:  1920,
+			Height: 1080,
+		},
+		// 模拟真实设备
+		DeviceScaleFactor: func() *float64 { f := 1.0; return &f }(),
+		IsMobile:          playwright.Bool(false),
+		HasTouch:          playwright.Bool(false),
+		// 设置语言和时区
+		Locale:     playwright.String("zh-CN"),
+		TimezoneId: playwright.String("Asia/Shanghai"),
+		// 启用JavaScript
+		JavaScriptEnabled: playwright.Bool(true),
+		// 设置权限
+		Permissions: []string{"geolocation", "notifications"},
 	}
 	
 	// 如果存在会话状态文件，则加载它
@@ -105,6 +131,13 @@ func (m *Manager) openPlatform(platformName, url string) {
 	if err != nil {
 		log.Printf("无法为 %s 创建新页面: %v", platformName, err)
 		return
+	}
+
+	// 注入stealth脚本，防止被检测为自动化浏览器
+	if err := stealth.Inject(page); err != nil {
+		log.Printf("注入stealth脚本失败 %s: %v", platformName, err)
+	} else {
+		log.Printf("已为 %s 启用反检测模式", platformName)
 	}
 
 	// 监听URL变化，保存会话状态
