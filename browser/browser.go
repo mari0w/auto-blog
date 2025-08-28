@@ -8,20 +8,17 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/playwright-community/playwright-go"
 )
 
 // Manager 浏览器管理器
 type Manager struct {
-	pw           *playwright.Playwright
-	context      playwright.BrowserContext
-	browser      playwright.Browser
-	userDataDir  string
-	closing      bool
-	lastSave     time.Time
-	saveMutex    sync.Mutex
+	pw          *playwright.Playwright
+	context     playwright.BrowserContext
+	browser     playwright.Browser
+	userDataDir string
+	closing     bool
 }
 
 // NewManager 创建浏览器管理器
@@ -69,7 +66,6 @@ func NewManager(userDataDir string) (*Manager, error) {
 		context:     context,
 		browser:     browser,
 		userDataDir: userDataDir,
-		lastSave:    time.Now(),
 	}
 	
 	// 监听浏览器断开连接事件
@@ -111,27 +107,13 @@ func (m *Manager) openPlatform(platformName, url string) {
 		return
 	}
 
-	// 监听页面导航事件，保存会话状态
-	page.On("response", func(response playwright.Response) {
-		// 只对HTML响应和主要域名的请求进行会话保存
-		if response.Request().ResourceType() == "document" {
-			go m.throttledSaveSession("页面响应")
-		}
-	})
-
-	// 监听页面加载完成事件
-	page.On("load", func() {
-		go m.throttledSaveSession("页面加载完成")
-	})
-
-	// 监听页面导航事件（URL变化）
+	// 监听URL变化，保存会话状态
 	page.On("framenavigated", func() {
-		go m.throttledSaveSession("页面导航")
-	})
-
-	// 监听DOM内容加载完成
-	page.On("domcontentloaded", func() {
-		go m.throttledSaveSession("DOM加载完成")
+		if err := m.SaveSession(); err != nil {
+			log.Printf("URL变化保存会话状态失败: %v", err)
+		} else {
+			log.Println("URL变化，已保存会话状态")
+		}
 	})
 
 	_, err = page.Goto(url)
@@ -157,23 +139,6 @@ func (m *Manager) WaitForExit() {
 }
 
 
-// throttledSaveSession 防抖保存会话状态，避免过于频繁的保存
-func (m *Manager) throttledSaveSession(reason string) {
-	m.saveMutex.Lock()
-	defer m.saveMutex.Unlock()
-	
-	// 如果距离上次保存不到5秒，跳过本次保存
-	if time.Since(m.lastSave) < 5*time.Second {
-		return
-	}
-	
-	if err := m.SaveSession(); err != nil {
-		log.Printf("自动保存会话状态失败 (%s): %v", reason, err)
-	} else {
-		log.Printf("自动保存会话状态成功 (%s)", reason)
-		m.lastSave = time.Now()
-	}
-}
 
 // SaveSession 保存会话状态
 func (m *Manager) SaveSession() error {
