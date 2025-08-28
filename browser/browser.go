@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
@@ -20,6 +21,8 @@ type Manager struct {
 	browser     playwright.Browser
 	userDataDir string
 	closing     bool
+	lastSave    time.Time
+	saveMutex   sync.Mutex
 }
 
 // NewManager 创建浏览器管理器
@@ -54,10 +57,10 @@ func NewManager(userDataDir string) (*Manager, error) {
 	contextOptions := playwright.BrowserNewContextOptions{
 		// 使用真实的User-Agent，模拟最新版本Chrome
 		UserAgent: playwright.String("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.234 Safari/537.36"),
-		// 设置真实的viewport
+		// 设置适中的viewport
 		Viewport: &playwright.Size{
-			Width:  1920,
-			Height: 1080,
+			Width:  1366,
+			Height: 768,
 		},
 		// 模拟真实设备
 		DeviceScaleFactor: func() *float64 { f := 1.0; return &f }(),
@@ -92,17 +95,18 @@ func NewManager(userDataDir string) (*Manager, error) {
 		context:     context,
 		browser:     browser,
 		userDataDir: userDataDir,
+		lastSave:    time.Now(),
 	}
 	
 	// 监听浏览器断开连接事件
 	browser.On("disconnected", func() {
 		// 只有在非正常关闭时才保存（即用户直接关闭浏览器）
 		if !manager.closing {
-			log.Println("检测到浏览器已关闭，保存会话状态")
+			log.Println("🔴 检测到浏览器已关闭，保存会话状态")
 			if err := manager.SaveSession(); err != nil {
-				log.Printf("保存会话状态失败: %v", err)
+				log.Printf("🚫 浏览器关闭时保存会话状态失败: %v", err)
 			} else {
-				log.Println("会话状态已保存")
+				log.Println("💾 浏览器关闭时会话状态已保存")
 			}
 		}
 	})
@@ -140,14 +144,29 @@ func (m *Manager) openPlatform(platformName, url string) {
 		log.Printf("已为 %s 启用反检测模式", platformName)
 	}
 
-	// 监听URL变化，保存会话状态
-	page.On("framenavigated", func() {
-		if err := m.SaveSession(); err != nil {
-			log.Printf("URL变化保存会话状态失败: %v", err)
-		} else {
-			log.Println("URL变化，已保存会话状态")
-		}
+	// 先测试最基础的事件监听
+	log.Printf("🎯 [%s] 开始设置事件监听", platformName)
+	
+	// 监听页面加载完成事件（使用防抖）
+	page.On("load", func() {
+		go func() {
+			currentURL := page.URL()
+			log.Printf("✅ [%s] 页面加载完成: %s", platformName, currentURL)
+			m.throttledSaveSession("页面加载", platformName)
+		}()
 	})
+
+	// 监听URL导航变化（使用防抖）
+	page.On("framenavigated", func() {
+		go func() {
+			currentURL := page.URL()
+			log.Printf("🔄 [%s] URL导航变化: %s", platformName, currentURL)
+			m.throttledSaveSession("URL导航", platformName)
+		}()
+	})
+
+
+	log.Printf("🎯 [%s] 事件监听设置完成", platformName)
 
 	_, err = page.Goto(url)
 	if err != nil {
@@ -173,6 +192,25 @@ func (m *Manager) WaitForExit() {
 
 
 
+// throttledSaveSession 防抖保存会话状态，避免频繁保存
+func (m *Manager) throttledSaveSession(reason, platformName string) {
+	m.saveMutex.Lock()
+	defer m.saveMutex.Unlock()
+	
+	// 如果距离上次保存不到3秒，跳过本次保存
+	if time.Since(m.lastSave) < 3*time.Second {
+		log.Printf("⏭️  [%s] %s触发保存被跳过（防抖）", platformName, reason)
+		return
+	}
+	
+	if err := m.SaveSession(); err != nil {
+		log.Printf("🚫 %s保存会话失败: %v", reason, err)
+	} else {
+		log.Printf("💾 %s已保存会话 [%s]", reason, platformName)
+		m.lastSave = time.Now()
+	}
+}
+
 // SaveSession 保存会话状态
 func (m *Manager) SaveSession() error {
 	if m.context != nil {
@@ -183,6 +221,14 @@ func (m *Manager) SaveSession() error {
 			data, err := json.Marshal(state)
 			if err == nil {
 				err = os.WriteFile(stateFile, data, 0644)
+				if err == nil {
+					// 统计cookies数量
+					cookieCount := 0
+					if state != nil && state.Cookies != nil {
+						cookieCount = len(state.Cookies)
+					}
+					log.Printf("📊 会话数据: %d个cookies, 文件大小: %d bytes", cookieCount, len(data))
+				}
 			}
 		}
 		return err
@@ -197,9 +243,9 @@ func (m *Manager) Close() {
 	
 	// 最后保存一次会话状态
 	if err := m.SaveSession(); err != nil {
-		log.Printf("保存会话状态失败: %v", err)
+		log.Printf("🚫 程序退出时保存会话状态失败: %v", err)
 	} else {
-		log.Println("会话状态已保存")
+		log.Println("💾 程序退出时会话状态已保存")
 	}
 	
 	if m.context != nil {
