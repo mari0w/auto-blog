@@ -6,6 +6,7 @@ import (
 	"github.com/auto-blog/browser"
 	"github.com/auto-blog/config"
 	"github.com/auto-blog/installer"
+	"github.com/auto-blog/session"
 )
 
 func main() {
@@ -29,8 +30,14 @@ func main() {
 		log.Fatalf("安装 Playwright 失败: %v", err)
 	}
 
-	// 创建浏览器管理器
-	browserManager, err := browser.NewManager()
+	// 创建会话管理器
+	sessionManager, err := session.NewManager()
+	if err != nil {
+		log.Fatalf("无法创建会话管理器: %v", err)
+	}
+
+	// 创建浏览器管理器（带会话持久化）
+	browserManager, err := browser.NewManager(sessionManager.GetUserDataDir())
 	if err != nil {
 		log.Fatalf("无法创建浏览器管理器: %v", err)
 	}

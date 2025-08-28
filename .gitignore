@@ -1,3 +1,7 @@
 go.sum
 CLAUDE.md
 .claude
+main
+
+# 会话数据
+.auto-blog/
