@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"github.com/auto-blog/article"
 	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
 	"github.com/playwright-community/playwright-go"
@@ -19,13 +20,13 @@ func NewManager() *Manager {
 }
 
 // CheckAndWaitForLogin 检查指定平台的登录状态（异步执行）
-func (m *Manager) CheckAndWaitForLogin(platformName string, page playwright.Page, originalURL string, saveSession juejin.SaveSessionFunc) {
+func (m *Manager) CheckAndWaitForLogin(platformName string, page playwright.Page, originalURL string, saveSession juejin.SaveSessionFunc, articles []*article.Article) {
 	// 异步执行登录检测，确保不同平台间互不干扰
 	go func() {
 		// 根据平台名称调用相应的登录检测
 		switch platformName {
 		case "掘金":
-			checker := juejin.NewLoginChecker(originalURL, saveSession)
+			checker := juejin.NewLoginChecker(originalURL, saveSession, articles)
 			checker.CheckAndWaitForLogin(page)
 		case "博客园":
 			// 需要将juejin.SaveSessionFunc转换为cnblogs.SaveSessionFunc

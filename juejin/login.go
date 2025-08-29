@@ -5,23 +5,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auto-blog/article"
 	"github.com/playwright-community/playwright-go"
 )
 
-// SaveSessionFunc 保存会话的回调函数类型
+// SaveSessionFunc 保存会话的回调函数类型  
 type SaveSessionFunc func() error
 
 // LoginChecker 掘金登录检查器
 type LoginChecker struct {
 	originalURL   string
 	saveSession   SaveSessionFunc
+	articles      []*article.Article
 }
 
 // NewLoginChecker 创建登录检查器
-func NewLoginChecker(originalURL string, saveSession SaveSessionFunc) *LoginChecker {
+func NewLoginChecker(originalURL string, saveSession SaveSessionFunc, articles []*article.Article) *LoginChecker {
 	return &LoginChecker{
 		originalURL: originalURL,
 		saveSession: saveSession,
+		articles:    articles,
 	}
 }
 
@@ -61,11 +64,46 @@ func (lc *LoginChecker) CheckAndWaitForLogin(page playwright.Page) {
 						log.Printf("正在跳转回编辑页面: %s", lc.originalURL)
 						page.Goto(lc.originalURL)
 					}
+					
+					// 登录成功后发布文章
+					if len(lc.articles) > 0 {
+						lc.publishArticles(page)
+					}
 					return
 				}
 			}
 		}
 	}
+}
+
+// publishArticles 发布所有文章
+func (lc *LoginChecker) publishArticles(page playwright.Page) {
+	if len(lc.articles) == 0 {
+		log.Println("没有需要发布的文章")
+		return
+	}
+	
+	log.Printf("准备发布 %d 篇文章到掘金", len(lc.articles))
+	
+	// 创建发布器
+	publisher := NewPublisher(page)
+	
+	// 等待编辑器加载完成
+	if err := publisher.WaitForEditor(); err != nil {
+		log.Printf("❌ 等待编辑器失败: %v", err)
+		return
+	}
+	
+	// 发布第一篇文章（作为示例）
+	article := lc.articles[0]
+	log.Printf("开始发布文章: %s", article.Title)
+	
+	if err := publisher.PublishArticle(article); err != nil {
+		log.Printf("❌ 发布文章失败: %v", err)
+		return
+	}
+	
+	log.Printf("🎉 文章《%s》已发布到掘金", article.Title)
 }
 
 // IsLoginRequired 检查是否需要登录

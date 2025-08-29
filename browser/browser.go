@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/auto-blog/article"
+	"github.com/auto-blog/juejin"
 	"github.com/auto-blog/platform"
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
@@ -164,8 +166,14 @@ func (m *Manager) openPlatform(platformName, url string) {
 		State: playwright.LoadStateNetworkidle,
 	})
 
-	// 检查是否需要登录
-	m.platformManager.CheckAndWaitForLogin(platformName, page, url, m.SaveSession)
+	// 异步处理登录检测和文章发布
+	go func() {
+		// 首先尝试直接发布文章（如果已登录）
+		m.tryPublishArticle(platformName, page, url)
+		
+		// 然后检查是否需要登录
+		m.platformManager.CheckAndWaitForLogin(platformName, page, url, m.SaveSession, m.articles)
+	}()
 }
 
 // WaitForExit 等待用户退出信号并优雅关闭
@@ -189,6 +197,80 @@ func (m *Manager) GetArticles() []*article.Article {
 // GetArticleCount 获取文章数量
 func (m *Manager) GetArticleCount() int {
 	return len(m.articles)
+}
+
+// tryPublishArticle 尝试直接发布文章（如果页面已经是编辑器状态）
+func (m *Manager) tryPublishArticle(platformName string, page playwright.Page, url string) {
+	if len(m.articles) == 0 {
+		return // 没有文章要发布
+	}
+	
+	log.Printf("尝试直接发布文章到 %s", platformName)
+	
+	// 根据不同平台尝试发布
+	switch platformName {
+	case "掘金":
+		m.tryPublishToJuejin(page)
+	case "博客园":
+		// 后续可以添加博客园的发布逻辑
+		log.Printf("博客园发布功能暂未实现")
+	default:
+		log.Printf("平台 %s 暂不支持直接发布", platformName)
+	}
+}
+
+// tryPublishToJuejin 尝试发布文章到掘金
+func (m *Manager) tryPublishToJuejin(page playwright.Page) {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "editor/drafts") {
+		log.Printf("当前页面不是掘金编辑器，跳过直接发布")
+		return
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("input.title-input")
+	editorLocator := page.Locator("div.CodeMirror-scroll")
+	
+	// 等待编辑器元素，但使用较短的超时时间
+	titleVisible := make(chan bool, 1)
+	editorVisible := make(chan bool, 1)
+	
+	go func() {
+		err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(3000), // 3秒超时
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		titleVisible <- (err == nil)
+	}()
+	
+	go func() {
+		err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(3000), // 3秒超时
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		editorVisible <- (err == nil)
+	}()
+	
+	// 等待两个元素都检查完成
+	titleReady := <-titleVisible
+	editorReady := <-editorVisible
+	
+	if titleReady && editorReady {
+		log.Println("✅ 检测到掘金编辑器已就绪，开始发布文章")
+		
+		// 创建发布器并发布第一篇文章
+		publisher := juejin.NewPublisher(page)
+		article := m.articles[0]
+		
+		if err := publisher.PublishArticle(article); err != nil {
+			log.Printf("❌ 直接发布失败: %v", err)
+		} else {
+			log.Printf("🎉 文章《%s》已成功发布到掘金", article.Title)
+		}
+	} else {
+		log.Println("编辑器尚未就绪，将等待登录检测")
+	}
 }
 
 // SaveSession 保存会话状态（带日志输出，用于程序启动和退出）
