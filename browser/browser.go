@@ -10,19 +10,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/auto-blog/platform"
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
 )
 
 // Manager 浏览器管理器
 type Manager struct {
-	pw          *playwright.Playwright
-	context     playwright.BrowserContext
-	browser     playwright.Browser
-	userDataDir string
-	closing     bool
-	lastSave    time.Time
-	saveMutex   sync.Mutex
+	pw              *playwright.Playwright
+	context         playwright.BrowserContext
+	browser         playwright.Browser
+	userDataDir     string
+	closing         bool
+	lastSave        time.Time
+	saveMutex       sync.Mutex
+	platformManager *platform.Manager
 }
 
 // NewManager 创建浏览器管理器
@@ -74,7 +76,7 @@ func NewManager(userDataDir string) (*Manager, error) {
 		// 设置权限
 		Permissions: []string{"geolocation", "notifications"},
 	}
-	
+
 	// 如果存在会话状态文件，则加载它
 	if _, err := os.Stat(stateFile); err == nil {
 		contextOptions.StorageStatePath = playwright.String(stateFile)
@@ -82,7 +84,7 @@ func NewManager(userDataDir string) (*Manager, error) {
 	} else {
 		log.Println("首次运行，创建新会话")
 	}
-	
+
 	context, err := browser.NewContext(contextOptions)
 	if err != nil {
 		browser.Close()
@@ -91,13 +93,14 @@ func NewManager(userDataDir string) (*Manager, error) {
 	}
 
 	manager := &Manager{
-		pw:          pw,
-		context:     context,
-		browser:     browser,
-		userDataDir: userDataDir,
-		lastSave:    time.Now(),
+		pw:              pw,
+		context:         context,
+		browser:         browser,
+		userDataDir:     userDataDir,
+		lastSave:        time.Now(),
+		platformManager: platform.NewManager(),
 	}
-	
+
 	// 监听浏览器断开连接事件
 	browser.On("disconnected", func() {
 		// 只有在非正常关闭时才保存（即用户直接关闭浏览器）
@@ -110,7 +113,7 @@ func NewManager(userDataDir string) (*Manager, error) {
 			}
 		}
 	})
-	
+
 	return manager, nil
 }
 
@@ -144,30 +147,7 @@ func (m *Manager) openPlatform(platformName, url string) {
 		log.Printf("已为 %s 启用反检测模式", platformName)
 	}
 
-	// 先测试最基础的事件监听
-	log.Printf("🎯 [%s] 开始设置事件监听", platformName)
-	
-	// 监听页面加载完成事件（使用防抖）
-	page.On("load", func() {
-		go func() {
-			currentURL := page.URL()
-			log.Printf("✅ [%s] 页面加载完成: %s", platformName, currentURL)
-			m.throttledSaveSession("页面加载", platformName)
-		}()
-	})
-
-	// 监听URL导航变化（使用防抖）
-	page.On("framenavigated", func() {
-		go func() {
-			currentURL := page.URL()
-			log.Printf("🔄 [%s] URL导航变化: %s", platformName, currentURL)
-			m.throttledSaveSession("URL导航", platformName)
-		}()
-	})
-
-
-	log.Printf("🎯 [%s] 事件监听设置完成", platformName)
-
+	// 打开页面
 	_, err = page.Goto(url)
 	if err != nil {
 		log.Printf("无法打开 %s (%s): %v", platformName, url, err)
@@ -175,43 +155,30 @@ func (m *Manager) openPlatform(platformName, url string) {
 	}
 
 	log.Printf("已打开 %s: %s", platformName, url)
+
+	// 等待页面加载完成
+	page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State: playwright.LoadStateNetworkidle,
+	})
+
+	// 检查是否需要登录
+	m.platformManager.CheckAndWaitForLogin(platformName, page, url, m.SaveSession)
 }
 
 // WaitForExit 等待用户退出信号并优雅关闭
 func (m *Manager) WaitForExit() {
 	log.Println("浏览器已打开，按 Ctrl+C 退出程序")
-	
+
 	// 监听系统信号，优雅退出
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
-	
+
 	log.Println("正在关闭...")
 	m.Close()
 }
 
-
-
-// throttledSaveSession 防抖保存会话状态，避免频繁保存
-func (m *Manager) throttledSaveSession(reason, platformName string) {
-	m.saveMutex.Lock()
-	defer m.saveMutex.Unlock()
-	
-	// 如果距离上次保存不到3秒，跳过本次保存
-	if time.Since(m.lastSave) < 3*time.Second {
-		log.Printf("⏭️  [%s] %s触发保存被跳过（防抖）", platformName, reason)
-		return
-	}
-	
-	if err := m.SaveSession(); err != nil {
-		log.Printf("🚫 %s保存会话失败: %v", reason, err)
-	} else {
-		log.Printf("💾 %s已保存会话 [%s]", reason, platformName)
-		m.lastSave = time.Now()
-	}
-}
-
-// SaveSession 保存会话状态
+// SaveSession 保存会话状态（带日志输出，用于程序启动和退出）
 func (m *Manager) SaveSession() error {
 	if m.context != nil {
 		stateFile := filepath.Join(m.userDataDir, "state.json")
@@ -240,14 +207,14 @@ func (m *Manager) SaveSession() error {
 func (m *Manager) Close() {
 	// 标记正在关闭，避免重复保存
 	m.closing = true
-	
+
 	// 最后保存一次会话状态
 	if err := m.SaveSession(); err != nil {
 		log.Printf("🚫 程序退出时保存会话状态失败: %v", err)
 	} else {
 		log.Println("💾 程序退出时会话状态已保存")
 	}
-	
+
 	if m.context != nil {
 		m.context.Close()
 	}
