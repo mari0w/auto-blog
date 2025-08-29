@@ -1,4 +1,4 @@
-package juejin
+package cnblogs
 
 import (
 	"fmt"
@@ -11,34 +11,34 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
-// Publisher 掘金文章发布器
+// Publisher 博客园文章发布器
 type Publisher struct {
 	page playwright.Page
 }
 
-// NewPublisher 创建掘金文章发布器
+// NewPublisher 创建博客园文章发布器
 func NewPublisher(page playwright.Page) *Publisher {
 	return &Publisher{
 		page: page,
 	}
 }
 
-// PublishArticle 发布文章到掘金
+// PublishArticle 发布文章到博客园
 func (p *Publisher) PublishArticle(art *article.Article) error {
-	log.Printf("开始发布文章到掘金: %s", art.Title)
+	log.Printf("开始发布文章到博客园: %s", art.Title)
 	
 	// 1. 填写标题
 	if err := p.fillTitle(art.Title); err != nil {
 		log.Printf("⚠️ 标题填写遇到问题: %v", err)
 	} else {
-		log.Println("✅ 标题填写完成")
+		log.Printf("✅ 标题填写完成")
 	}
 	
 	// 2. 填写正文
 	if err := p.fillContent(art); err != nil {
 		log.Printf("⚠️ 正文填写遇到问题: %v", err)
 	} else {
-		log.Println("✅ 正文填写完成")
+		log.Printf("✅ 正文填写完成")
 	}
 	
 	log.Printf("🎉 文章《%s》发布操作完成", art.Title)
@@ -48,8 +48,7 @@ func (p *Publisher) PublishArticle(art *article.Article) error {
 // fillTitle 填写文章标题
 func (p *Publisher) fillTitle(title string) error {
 	// 等待标题输入框出现并可见
-	titleSelector := "input.title-input"
-	titleLocator := p.page.Locator(titleSelector)
+	titleLocator := p.page.Locator("#post-title")
 	
 	// 等待元素可见
 	if err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
@@ -72,11 +71,9 @@ func (p *Publisher) fillTitle(title string) error {
 
 // fillContent 填写文章正文（支持图片）
 func (p *Publisher) fillContent(art *article.Article) error {
-	// CodeMirror 编辑器选择器
-	editorSelector := "div.CodeMirror-scroll"
-	editorLocator := p.page.Locator(editorSelector)
-	
 	// 等待编辑器出现并可见
+	editorLocator := p.page.Locator("#md-editor")
+	
 	if err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
 		Timeout: playwright.Float(10000), // 10秒超时
 		State:   playwright.WaitForSelectorStateVisible,
@@ -91,15 +88,6 @@ func (p *Publisher) fillContent(art *article.Article) error {
 	
 	// 等待获取焦点
 	time.Sleep(500 * time.Millisecond)
-	
-	// 清空现有内容
-	if err := p.page.Keyboard().Press("Control+A"); err != nil {
-		return fmt.Errorf("选择内容失败: %v", err)
-	}
-	
-	if err := p.page.Keyboard().Press("Delete"); err != nil {
-		return fmt.Errorf("删除内容失败: %v", err)
-	}
 	
 	// 检查是否有图片需要处理
 	if len(art.Images) > 0 {
@@ -116,29 +104,8 @@ func (p *Publisher) fillContent(art *article.Article) error {
 func (p *Publisher) fillTextOnlyContent(content []string) error {
 	fullContent := strings.Join(content, "\n")
 	
-	// 使用JavaScript直接设置CodeMirror内容，避免缩进问题
-	jsCode := `
-		(function(content) {
-			// 查找CodeMirror实例
-			const cmElement = document.querySelector('.CodeMirror');
-			if (cmElement && cmElement.CodeMirror) {
-				// 直接设置CodeMirror的值，避免缩进问题
-				cmElement.CodeMirror.setValue(content);
-				return true;
-			} else {
-				// 降级方案：直接设置到可编辑区域
-				const editableArea = document.querySelector('.CodeMirror-code');
-				if (editableArea) {
-					editableArea.textContent = content;
-					return true;
-				}
-			}
-			return false;
-		})
-	`
-	_, err := p.page.Evaluate(jsCode, fullContent)
-	
-	if err != nil {
+	// 使用JavaScript直接设置编辑器内容
+	if err := p.SetContent(fullContent); err != nil {
 		log.Printf("JavaScript设置失败，使用键盘输入: %v", err)
 		if err := p.page.Keyboard().Type(fullContent); err != nil {
 			return fmt.Errorf("键盘输入失败: %v", err)
@@ -151,23 +118,39 @@ func (p *Publisher) fillTextOnlyContent(content []string) error {
 
 // fillContentWithImages 填写带图片的内容 - 使用通用图片处理器
 func (p *Publisher) fillContentWithImages(art *article.Article) error {
-	// 创建掘金的图片上传配置
+	// 创建博客园的图片上传配置
 	config := common.ImageUploadConfig{
-		PlatformName: "掘金",
+		PlatformName: "博客园",
 		UploadButtonJs: `
 			(function() {
-				const uploadButton = document.querySelectorAll('div[class="bytemd-toolbar-icon bytemd-tippy"]')[5];
-				if (uploadButton) {
-					uploadButton.click();
-					return true;
+				// 第一步：点击上传图片按钮
+				const uploadImageBtn = document.querySelector('li[title="上传图片(Ctrl + I)"]');
+				if (!uploadImageBtn) {
+					return false;
 				}
-				return false;
+				uploadImageBtn.click();
+				
+				// 等待一下弹窗出现
+				setTimeout(() => {
+					// 第二步：点击上传按钮
+					const uploadButton = document.querySelector('button.upload-button');
+					if (uploadButton) {
+						uploadButton.click();
+					}
+				}, 300);
+				
+				return true;
 			})()
 		`,
 		ImageCheckJs: `
 			(function() {
-				const images = document.querySelectorAll('.CodeMirror img, .bytemd-body img, .markdown-body img');
-				return images.length > 0;
+				// 检查编辑器中是否有图片
+				const editor = document.querySelector('#md-editor');
+				if (editor) {
+					const images = editor.querySelectorAll('img');
+					return images.length > 0;
+				}
+				return false;
 			})()
 		`,
 		UploadTimeout: 15 * time.Second,
@@ -181,28 +164,71 @@ func (p *Publisher) fillContentWithImages(art *article.Article) error {
 
 // SetContent 实现EditorHandler接口 - 设置编辑器内容
 func (p *Publisher) SetContent(content string) error {
+	// 博客园的编辑器可能是CodeMirror或其他类型
+	// 尝试多种设置方式
 	jsCode := `
 		(function(content) {
-			const cmElement = document.querySelector('.CodeMirror');
+			// 尝试1: 直接设置textarea的value
+			const editor = document.querySelector('#md-editor');
+			if (editor) {
+				if (editor.tagName.toLowerCase() === 'textarea') {
+					editor.value = content;
+					// 触发change事件
+					editor.dispatchEvent(new Event('change', {bubbles: true}));
+					return true;
+				}
+			}
+			
+			// 尝试2: CodeMirror方式
+			const cmElement = document.querySelector('#md-editor .CodeMirror');
 			if (cmElement && cmElement.CodeMirror) {
 				cmElement.CodeMirror.setValue(content);
 				return true;
 			}
+			
+			// 尝试3: 直接设置内容
+			if (editor) {
+				editor.textContent = content;
+				return true;
+			}
+			
 			return false;
 		})
 	`
-	_, err := p.page.Evaluate(jsCode, content)
+	
+	result, err := p.page.Evaluate(jsCode, content)
 	if err != nil {
 		return fmt.Errorf("设置编辑器内容失败: %v", err)
 	}
+	
+	if success, ok := result.(bool); !ok || !success {
+		return fmt.Errorf("无法找到合适的编辑器设置方式")
+	}
+	
 	return nil
 }
 
 // FindAndSelectText 实现EditorHandler接口 - 查找并选中文本
 func (p *Publisher) FindAndSelectText(text string) error {
+	// 博客园编辑器的文本查找和选择
 	jsCode := `
 		(function(searchText) {
-			const cmElement = document.querySelector('.CodeMirror');
+			const editor = document.querySelector('#md-editor');
+			if (!editor) return false;
+			
+			// 如果是textarea
+			if (editor.tagName.toLowerCase() === 'textarea') {
+				const content = editor.value;
+				const index = content.indexOf(searchText);
+				if (index !== -1) {
+					editor.focus();
+					editor.setSelectionRange(index, index + searchText.length);
+					return true;
+				}
+			}
+			
+			// 如果是CodeMirror
+			const cmElement = document.querySelector('#md-editor .CodeMirror');
 			if (cmElement && cmElement.CodeMirror) {
 				const cm = cmElement.CodeMirror;
 				const content = cm.getValue();
@@ -218,9 +244,11 @@ func (p *Publisher) FindAndSelectText(text string) error {
 					return true;
 				}
 			}
+			
 			return false;
 		})
 	`
+	
 	result, err := p.page.Evaluate(jsCode, text)
 	if err != nil {
 		return fmt.Errorf("查找文本失败: %v", err)
@@ -234,12 +262,10 @@ func (p *Publisher) FindAndSelectText(text string) error {
 	return nil
 }
 
-
 // WaitForEditor 等待编辑器加载完成
 func (p *Publisher) WaitForEditor() error {
 	// 等待标题输入框
-	titleSelector := "input.title-input"
-	titleLocator := p.page.Locator(titleSelector)
+	titleLocator := p.page.Locator("#post-title")
 	if err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
 		Timeout: playwright.Float(15000),
 		State:   playwright.WaitForSelectorStateVisible,
@@ -247,9 +273,8 @@ func (p *Publisher) WaitForEditor() error {
 		return fmt.Errorf("等待标题输入框超时: %v", err)
 	}
 	
-	// 等待CodeMirror编辑器
-	editorSelector := "div.CodeMirror-scroll"
-	editorLocator := p.page.Locator(editorSelector)
+	// 等待编辑器
+	editorLocator := p.page.Locator("#md-editor")
 	if err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
 		Timeout: playwright.Float(15000),
 		State:   playwright.WaitForSelectorStateVisible,
@@ -257,6 +282,6 @@ func (p *Publisher) WaitForEditor() error {
 		return fmt.Errorf("等待编辑器超时: %v", err)
 	}
 	
-	log.Println("✅ 掘金编辑器已加载完成")
+	log.Println("✅ 博客园编辑器已加载完成")
 	return nil
 }

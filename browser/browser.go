@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/auto-blog/article"
+	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
 	"github.com/auto-blog/platform"
 	"github.com/jonfriesen/playwright-go-stealth"
@@ -212,8 +213,7 @@ func (m *Manager) tryPublishArticle(platformName string, page playwright.Page, u
 	case "掘金":
 		m.tryPublishToJuejin(page)
 	case "博客园":
-		// 后续可以添加博客园的发布逻辑
-		log.Printf("博客园发布功能暂未实现")
+		m.tryPublishToCnblogs(page)
 	default:
 		log.Printf("平台 %s 暂不支持直接发布", platformName)
 	}
@@ -267,6 +267,60 @@ func (m *Manager) tryPublishToJuejin(page playwright.Page) {
 			log.Printf("❌ 直接发布失败: %v", err)
 		} else {
 			log.Printf("🎉 文章《%s》已成功发布到掘金", article.Title)
+		}
+	} else {
+		log.Println("编辑器尚未就绪，将等待登录检测")
+	}
+}
+
+// tryPublishToCnblogs 尝试发布文章到博客园
+func (m *Manager) tryPublishToCnblogs(page playwright.Page) {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "i.cnblogs.com/posts") {
+		log.Printf("当前页面不是博客园编辑器，跳过直接发布")
+		return
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("#post-title")
+	editorLocator := page.Locator("#md-editor")
+	
+	// 等待编辑器元素，但使用较短的超时时间
+	titleVisible := make(chan bool, 1)
+	editorVisible := make(chan bool, 1)
+	
+	go func() {
+		err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(2000),
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		titleVisible <- (err == nil)
+	}()
+	
+	go func() {
+		err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(2000),
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		editorVisible <- (err == nil)
+	}()
+	
+	// 等待两个检查完成
+	titleReady := <-titleVisible
+	editorReady := <-editorVisible
+	
+	if titleReady && editorReady {
+		log.Println("✅ 检测到博客园编辑器已就绪，开始发布文章")
+		
+		// 创建发布器并发布第一篇文章
+		publisher := cnblogs.NewPublisher(page)
+		article := m.articles[0]
+		
+		if err := publisher.PublishArticle(article); err != nil {
+			log.Printf("❌ 直接发布失败: %v", err)
+		} else {
+			log.Printf("🎉 文章《%s》已成功发布到博客园", article.Title)
 		}
 	} else {
 		log.Println("编辑器尚未就绪，将等待登录检测")
