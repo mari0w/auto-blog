@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 
+	"github.com/auto-blog/article"
 	"github.com/auto-blog/browser"
 	"github.com/auto-blog/config"
 	"github.com/auto-blog/installer"
@@ -25,6 +26,23 @@ func main() {
 
 	log.Printf("启用的平台: %d个", len(enabledPlatforms))
 
+	// 解析articles目录下的所有文章
+	log.Println("正在解析articles目录下的文章...")
+	parser := article.NewParser("articles")
+	articles, err := parser.ParseAllFiles()
+	if err != nil {
+		log.Fatalf("解析文章失败: %v", err)
+	}
+	
+	if len(articles) == 0 {
+		log.Println("⚠️ articles目录下没有找到.md文件")
+	} else {
+		log.Printf("✅ 成功解析 %d 篇文章:", len(articles))
+		for i, art := range articles {
+			log.Printf("  %d. %s (%d行)", i+1, art.Title, art.GetContentLineCount())
+		}
+	}
+
 	// 检查并安装 Playwright
 	if err := installer.EnsurePlaywrightInstalled(); err != nil {
 		log.Fatalf("安装 Playwright 失败: %v", err)
@@ -36,8 +54,8 @@ func main() {
 		log.Fatalf("无法创建会话管理器: %v", err)
 	}
 
-	// 创建浏览器管理器（带会话持久化）
-	browserManager, err := browser.NewManager(sessionManager.GetUserDataDir())
+	// 创建浏览器管理器（带会话持久化和文章数据）
+	browserManager, err := browser.NewManager(sessionManager.GetUserDataDir(), articles)
 	if err != nil {
 		log.Fatalf("无法创建浏览器管理器: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/auto-blog/article"
 	"github.com/auto-blog/platform"
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
@@ -25,10 +26,11 @@ type Manager struct {
 	lastSave        time.Time
 	saveMutex       sync.Mutex
 	platformManager *platform.Manager
+	articles        []*article.Article
 }
 
 // NewManager 创建浏览器管理器
-func NewManager(userDataDir string) (*Manager, error) {
+func NewManager(userDataDir string, articles []*article.Article) (*Manager, error) {
 	pw, err := playwright.Run()
 	if err != nil {
 		return nil, err
@@ -99,6 +101,7 @@ func NewManager(userDataDir string) (*Manager, error) {
 		userDataDir:     userDataDir,
 		lastSave:        time.Now(),
 		platformManager: platform.NewManager(),
+		articles:        articles,
 	}
 
 	// 监听浏览器断开连接事件
@@ -176,6 +179,16 @@ func (m *Manager) WaitForExit() {
 
 	log.Println("正在关闭...")
 	m.Close()
+}
+
+// GetArticles 获取所有文章
+func (m *Manager) GetArticles() []*article.Article {
+	return m.articles
+}
+
+// GetArticleCount 获取文章数量
+func (m *Manager) GetArticleCount() int {
+	return len(m.articles)
 }
 
 // SaveSession 保存会话状态（带日志输出，用于程序启动和退出）
