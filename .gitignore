@@ -3,6 +3,5 @@ CLAUDE.md
 .claude
 main
 auto-blog
-
-# 会话数据
 .auto-blog/
+articles

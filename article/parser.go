@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -13,6 +14,15 @@ type Article struct {
 	Title   string   `json:"title"`   // 文章标题
 	Content []string `json:"content"` // 文章正文（每行一个元素）
 	Path    string   `json:"path"`    // 文件路径
+	Images  []Image  `json:"images"`  // 文章中的图片信息
+}
+
+// Image 图片信息结构体
+type Image struct {
+	AltText     string `json:"alt_text"`     // 图片alt文本
+	RelativePath string `json:"relative_path"` // 相对路径（如 ./images/example.png）
+	AbsolutePath string `json:"absolute_path"` // 绝对路径
+	LineIndex   int    `json:"line_index"`   // 在content中的行索引
 }
 
 // Parser 文章解析器
@@ -59,15 +69,21 @@ func (p *Parser) ParseFile(filePath string) (*Article, error) {
 	
 	// 去除标题行，剩下的是正文
 	content := make([]string, 0)
+	images := make([]Image, 0)
+	
 	if len(lines) > 1 {
 		// 从第二行开始是正文
 		content = lines[1:]
+		
+		// 解析图片
+		images = p.parseImages(content, filePath)
 	}
 	
 	article := &Article{
 		Title:   title,
 		Content: content,
 		Path:    filePath,
+		Images:  images,
 	}
 	
 	return article, nil
@@ -112,8 +128,60 @@ func (a *Article) GetContentLineCount() int {
 	return len(a.Content)
 }
 
+// parseImages 解析文章中的图片
+func (p *Parser) parseImages(content []string, articlePath string) []Image {
+	images := make([]Image, 0)
+	
+	// Markdown图片正则：![alt文本](图片路径)
+	imageRegex := regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	
+	// 获取文章所在目录
+	articleDir := filepath.Dir(articlePath)
+	
+	for i, line := range content {
+		matches := imageRegex.FindAllStringSubmatch(line, -1)
+		for _, match := range matches {
+			if len(match) >= 3 {
+				altText := match[1]
+				relativePath := match[2]
+				
+				// 计算绝对路径
+				var absolutePath string
+				if strings.HasPrefix(relativePath, "./") {
+					// 相对路径，基于文章目录解析
+					absolutePath = filepath.Join(articleDir, relativePath[2:])
+				} else if strings.HasPrefix(relativePath, "/") {
+					// 绝对路径
+					absolutePath = relativePath
+				} else {
+					// 相对路径，基于文章目录
+					absolutePath = filepath.Join(articleDir, relativePath)
+				}
+				
+				// 转换为绝对路径
+				absPath, err := filepath.Abs(absolutePath)
+				if err != nil {
+					absPath = absolutePath
+				}
+				
+				image := Image{
+					AltText:     altText,
+					RelativePath: relativePath,
+					AbsolutePath: absPath,
+					LineIndex:   i,
+				}
+				
+				images = append(images, image)
+			}
+		}
+	}
+	
+	return images
+}
+
 // String 文章的字符串表示
 func (a *Article) String() string {
-	return fmt.Sprintf("标题: %s\n正文行数: %d\n文件路径: %s", 
-		a.Title, a.GetContentLineCount(), a.Path)
+	imageCount := len(a.Images)
+	return fmt.Sprintf("标题: %s\n正文行数: %d\n图片数量: %d\n文件路径: %s", 
+		a.Title, a.GetContentLineCount(), imageCount, a.Path)
 }

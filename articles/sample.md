@@ -3,6 +3,8 @@ Go语言中的并发编程最佳实践
 
 Go语言以其出色的并发特性而闻名，通过goroutines和channels提供了强大的并发编程能力。本文将深入探讨Go语言中的并发编程最佳实践。
 
+![Go语言并发架构图](./images/go-concurrency-architecture.png)
+
 ## 什么是Goroutine
 
 Goroutine是Go语言的轻量级线程，它们由Go运行时管理。创建一个goroutine非常简单：
@@ -12,6 +14,8 @@ go func() {
     fmt.Println("Hello from goroutine")
 }()
 ```
+
+![Goroutine执行示意图](./images/goroutine-execution.png)
 
 ## Channel的使用
 
