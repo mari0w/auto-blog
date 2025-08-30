@@ -648,7 +648,7 @@ func (p *Publisher) replacePlaceholdersWithImages(art *article.Article) error {
 
 // replaceTextWithImage 使用JavaScript查找并替换文本为图片
 func (p *Publisher) replaceTextWithImage(placeholder string, img article.Image) error {
-	// 使用JavaScript查找占位符并选中（不删除）
+	// 使用更精确的查找方法
 	result, err := p.page.Evaluate(fmt.Sprintf(`
 		(function() {
 			try {
@@ -658,47 +658,95 @@ func (p *Publisher) replaceTextWithImage(placeholder string, img article.Image) 
 					return { success: false, error: '找不到编辑器' };
 				}
 				
-				// 创建一个TreeWalker来遍历文本节点
-				const walker = document.createTreeWalker(
-					editor,
-					NodeFilter.SHOW_TEXT,
-					null,
-					false
-				);
+				// 获取编辑器的纯文本内容来查找占位符位置
+				const fullText = editor.textContent || editor.innerText;
+				const placeholderIndex = fullText.indexOf(placeholder);
 				
-				let node;
-				let found = false;
-				
-				while (node = walker.nextNode()) {
-					const index = node.textContent.indexOf(placeholder);
-					if (index !== -1) {
-						// 找到占位符，创建选择范围
-						const range = document.createRange();
-						range.setStart(node, index);
-						range.setEnd(node, index + placeholder.length);
-						
-						// 设置选择
-						const selection = window.getSelection();
-						selection.removeAllRanges();
-						selection.addRange(range);
-						
-						// 确保编辑器获得焦点
-						editor.focus();
-						
-						// 返回选中的文本以验证
-						const selectedText = selection.toString();
-						found = true;
-						
-						return { 
-							success: true, 
-							selectedText: selectedText,
-							placeholderLength: placeholder.length
-						};
-					}
+				if (placeholderIndex === -1) {
+					return { success: false, error: '在编辑器中未找到占位符: ' + placeholder };
 				}
 				
+				console.log('找到占位符在位置:', placeholderIndex, '总长度:', fullText.length);
+				
+				// 使用window.find()来查找和选中文本
+				// 先清除所有选择
+				window.getSelection().removeAllRanges();
+				
+				// 使用浏览器原生的查找功能
+				const found = window.find(placeholder, true, false, false, false, false, false);
+				
 				if (!found) {
-					return { success: false, error: '未找到占位符: ' + placeholder };
+					// 如果window.find失败，尝试手动遍历
+					const walker = document.createTreeWalker(
+						editor,
+						NodeFilter.SHOW_TEXT,
+						null,
+						false
+					);
+					
+					let node;
+					let textOffset = 0;
+					let targetNode = null;
+					let targetOffset = 0;
+					
+					while (node = walker.nextNode()) {
+						const nodeText = node.textContent;
+						const nodeLength = nodeText.length;
+						
+						// 检查占位符是否在这个节点中
+						if (textOffset <= placeholderIndex && placeholderIndex < textOffset + nodeLength) {
+							targetNode = node;
+							targetOffset = placeholderIndex - textOffset;
+							
+							// 检查占位符是否完整在这个节点中
+							const localIndex = nodeText.indexOf(placeholder);
+							if (localIndex !== -1) {
+								// 占位符完整在这个节点中
+								const range = document.createRange();
+								range.setStart(node, localIndex);
+								range.setEnd(node, localIndex + placeholder.length);
+								
+								const selection = window.getSelection();
+								selection.removeAllRanges();
+								selection.addRange(range);
+								
+								editor.focus();
+								
+								return {
+									success: true,
+									selectedText: selection.toString(),
+									method: 'TreeWalker',
+									nodeInfo: {
+										nodeType: node.nodeType,
+										parentTag: node.parentElement ? node.parentElement.tagName : 'unknown'
+									}
+								};
+							}
+						}
+						
+						textOffset += nodeLength;
+					}
+					
+					return { success: false, error: '无法精确定位占位符节点' };
+				} else {
+					// window.find成功
+					const selection = window.getSelection();
+					const selectedText = selection.toString();
+					
+					// 确保选中的是完整的占位符
+					if (selectedText === placeholder) {
+						editor.focus();
+						return {
+							success: true,
+							selectedText: selectedText,
+							method: 'window.find'
+						};
+					} else {
+						return {
+							success: false,
+							error: '选中的文本不匹配: ' + selectedText
+						};
+					}
 				}
 				
 			} catch (e) {
@@ -717,14 +765,17 @@ func (p *Publisher) replaceTextWithImage(placeholder string, img article.Image) 
 			return fmt.Errorf("查找占位符失败: %s", errorMsg)
 		}
 		
-		// 验证选中的文本
+		// 记录调试信息
 		if selectedText, ok := resultMap["selectedText"].(string); ok {
 			log.Printf("[知乎] 已选中文本: %s (长度: %d)", selectedText, len(selectedText))
+		}
+		if method, ok := resultMap["method"].(string); ok {
+			log.Printf("[知乎] 使用方法: %s", method)
 		}
 	}
 	
 	// 等待一下确保选择稳定
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	
 	// 复制图片到剪贴板
 	if err := p.copyImageToClipboard(img.AbsolutePath); err != nil {

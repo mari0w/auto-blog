@@ -124,22 +124,88 @@ func NewManager(userDataDir string, articles []*article.Article) (*Manager, erro
 	return manager, nil
 }
 
-// OpenPlatforms 并行打开多个平台
+// OpenPlatforms 串行打开并发布到多个平台
 func (m *Manager) OpenPlatforms(platforms map[string]string) {
-	var wg sync.WaitGroup
-	for platform, url := range platforms {
-		wg.Add(1)
-		go func(platformName, platformURL string) {
-			defer wg.Done()
-			m.openPlatform(platformName, platformURL)
-		}(platform, url)
+	log.Printf("开始串行处理 %d 个平台", len(platforms))
+	
+	// 按顺序处理每个平台
+	platformOrder := []string{"知乎", "掘金", "博客园"} // 定义平台处理顺序
+	
+	for _, platformName := range platformOrder {
+		if url, exists := platforms[platformName]; exists {
+			log.Printf("\n========== 开始处理平台: %s ==========", platformName)
+			m.openAndPublishToPlatform(platformName, url)
+			log.Printf("========== 平台 %s 处理完成 ==========\n", platformName)
+			
+			// 平台之间稍作等待，确保剪贴板操作不冲突
+			time.Sleep(2 * time.Second)
+		}
 	}
-
-	wg.Wait()
-	log.Println("所有平台已打开")
+	
+	// 处理其他未在顺序列表中的平台
+	for platformName, url := range platforms {
+		found := false
+		for _, orderedName := range platformOrder {
+			if platformName == orderedName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Printf("\n========== 开始处理平台: %s ==========", platformName)
+			m.openAndPublishToPlatform(platformName, url)
+			log.Printf("========== 平台 %s 处理完成 ==========\n", platformName)
+			time.Sleep(2 * time.Second)
+		}
+	}
+	
+	log.Println("所有平台处理完成")
 }
 
-// openPlatform 在新页面中打开指定平台
+// openAndPublishToPlatform 同步打开平台并发布文章
+func (m *Manager) openAndPublishToPlatform(platformName, url string) {
+	page, err := m.context.NewPage()
+	if err != nil {
+		log.Printf("无法为 %s 创建新页面: %v", platformName, err)
+		return
+	}
+
+	// 注入stealth脚本，防止被检测为自动化浏览器
+	if err := stealth.Inject(page); err != nil {
+		log.Printf("注入stealth脚本失败 %s: %v", platformName, err)
+	} else {
+		log.Printf("已为 %s 启用反检测模式", platformName)
+	}
+
+	// 打开页面
+	_, err = page.Goto(url)
+	if err != nil {
+		log.Printf("无法打开 %s (%s): %v", platformName, url, err)
+		return
+	}
+
+	log.Printf("已打开 %s: %s", platformName, url)
+
+	// 等待页面加载完成
+	page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State: playwright.LoadStateNetworkidle,
+	})
+
+	// 同步尝试发布文章（如果已登录）
+	publishSuccess := m.tryPublishArticleSync(platformName, page, url)
+	
+	// 如果发布成功，等待一段时间让用户查看结果
+	if publishSuccess {
+		log.Printf("文章已成功发布到 %s，等待5秒后继续...", platformName)
+		time.Sleep(5 * time.Second)
+	} else {
+		// 如果没有成功发布，可能需要登录
+		log.Printf("%s 可能需要登录或手动操作", platformName)
+		// 这里可以添加等待用户手动登录的逻辑
+	}
+}
+
+// openPlatform 在新页面中打开指定平台（保留原方法但不再使用）
 func (m *Manager) openPlatform(platformName, url string) {
 	page, err := m.context.NewPage()
 	if err != nil {
@@ -199,6 +265,29 @@ func (m *Manager) GetArticles() []*article.Article {
 // GetArticleCount 获取文章数量
 func (m *Manager) GetArticleCount() int {
 	return len(m.articles)
+}
+
+// tryPublishArticleSync 同步尝试发布文章，返回是否成功
+func (m *Manager) tryPublishArticleSync(platformName string, page playwright.Page, url string) bool {
+	if len(m.articles) == 0 {
+		log.Printf("没有文章要发布")
+		return false
+	}
+	
+	log.Printf("尝试发布文章到 %s", platformName)
+	
+	// 根据不同平台尝试发布
+	switch platformName {
+	case "掘金":
+		return m.tryPublishToJuejinSync(page)
+	case "博客园":
+		return m.tryPublishToCnblogsSync(page)
+	case "知乎":
+		return m.tryPublishToZhihuSync(page)
+	default:
+		log.Printf("平台 %s 暂不支持直接发布", platformName)
+		return false
+	}
 }
 
 // tryPublishArticle 尝试直接发布文章（如果页面已经是编辑器状态）
@@ -328,6 +417,147 @@ func (m *Manager) tryPublishToCnblogs(page playwright.Page) {
 	} else {
 		log.Println("编辑器尚未就绪，将等待登录检测")
 	}
+}
+
+// tryPublishToJuejinSync 同步尝试发布文章到掘金
+func (m *Manager) tryPublishToJuejinSync(page playwright.Page) bool {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "editor/drafts") {
+		log.Printf("当前页面不是掘金编辑器，跳过直接发布")
+		return false
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("input.title-input")
+	editorLocator := page.Locator("div.CodeMirror-scroll")
+	
+	// 同步等待编辑器元素
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("掘金标题输入框未就绪: %v", err)
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("掘金编辑器未就绪: %v", err)
+		return false
+	}
+	
+	log.Println("✅ 检测到掘金编辑器已就绪，开始发布文章")
+	
+	// 创建发布器并发布第一篇文章
+	publisher := juejin.NewPublisher(page)
+	article := m.articles[0]
+	
+	if err := publisher.PublishArticle(article); err != nil {
+		log.Printf("❌ 发布失败: %v", err)
+		return false
+	}
+	
+	log.Printf("🎉 文章《%s》已成功发布到掘金", article.Title)
+	return true
+}
+
+// tryPublishToCnblogsSync 同步尝试发布文章到博客园
+func (m *Manager) tryPublishToCnblogsSync(page playwright.Page) bool {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "i.cnblogs.com/posts") {
+		log.Printf("当前页面不是博客园编辑器，跳过直接发布")
+		return false
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("#post-title")
+	editorLocator := page.Locator("#md-editor")
+	
+	// 同步等待编辑器元素
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("博客园标题输入框未就绪: %v", err)
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("博客园编辑器未就绪: %v", err)
+		return false
+	}
+	
+	log.Println("✅ 检测到博客园编辑器已就绪，开始发布文章")
+	
+	// 创建发布器并发布第一篇文章
+	publisher := cnblogs.NewPublisher(page)
+	article := m.articles[0]
+	
+	if err := publisher.PublishArticle(article); err != nil {
+		log.Printf("❌ 发布失败: %v", err)
+		return false
+	}
+	
+	log.Printf("🎉 文章《%s》已成功发布到博客园", article.Title)
+	return true
+}
+
+// tryPublishToZhihuSync 同步尝试发布文章到知乎
+func (m *Manager) tryPublishToZhihuSync(page playwright.Page) bool {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "zhuanlan.zhihu.com/write") {
+		log.Printf("当前页面不是知乎编辑器，跳过直接发布")
+		return false
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("textarea.Input")
+	editorLocator := page.Locator("div.Editable-content")
+	
+	// 同步等待编辑器元素
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("知乎标题输入框未就绪: %v", err)
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(3000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("知乎编辑器未就绪: %v", err)
+		return false
+	}
+	
+	log.Println("✅ 检测到知乎编辑器已就绪，开始发布文章")
+	
+	// 创建发布器并发布第一篇文章
+	publisher := zhihu.NewPublisher(page)
+	article := m.articles[0]
+	
+	if err := publisher.PublishArticle(article); err != nil {
+		log.Printf("❌ 发布失败: %v", err)
+		return false
+	}
+	
+	log.Printf("🎉 文章《%s》已成功发布到知乎", article.Title)
+	return true
 }
 
 // tryPublishToZhihu 尝试发布文章到知乎
