@@ -3,6 +3,7 @@ package config
 import (
 	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
+	"github.com/auto-blog/segmentfault"
 	"github.com/auto-blog/zhihu"
 	"gopkg.in/ini.v1"
 )
@@ -35,6 +36,9 @@ func (c *Config) GetEnabledPlatforms() map[string]string {
 	}
 	if publishSection.Key("zhihu").MustBool(false) {
 		enabledPlatforms["知乎"] = zhihu.URL()
+	}
+	if publishSection.Key("segmentfault").MustBool(false) {
+		enabledPlatforms["SegmentFault"] = segmentfault.URL()
 	}
 	
 	return enabledPlatforms

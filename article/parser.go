@@ -128,7 +128,7 @@ func (a *Article) GetContentLineCount() int {
 	return len(a.Content)
 }
 
-// parseImages 解析文章中的图片
+// parseImages 解析文章中的图片，并将原图片语法替换为占位符
 func (p *Parser) parseImages(content []string, articlePath string) []Image {
 	images := make([]Image, 0)
 	
@@ -172,6 +172,10 @@ func (p *Parser) parseImages(content []string, articlePath string) []Image {
 				}
 				
 				images = append(images, image)
+				
+				// 替换当前行中的图片语法为占位符（统一格式）
+				placeholder := fmt.Sprintf("IMAGE_PLACEHOLDER_%d", len(images)-1)
+				content[i] = imageRegex.ReplaceAllString(line, placeholder)
 			}
 		}
 	}

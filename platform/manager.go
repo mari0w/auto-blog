@@ -4,6 +4,7 @@ import (
 	"github.com/auto-blog/article"
 	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
+	"github.com/auto-blog/segmentfault"
 	"github.com/auto-blog/zhihu"
 	"github.com/playwright-community/playwright-go"
 )
@@ -37,6 +38,10 @@ func (m *Manager) CheckAndWaitForLogin(platformName string, page playwright.Page
 			// 需要将juejin.SaveSessionFunc转换为zhihu.SaveSessionFunc
 			zhihuChecker := zhihu.NewLoginChecker(originalURL, zhihu.SaveSessionFunc(saveSession), articles)
 			zhihuChecker.CheckAndWaitForLogin(page)
+		case "SegmentFault":
+			// 需要将juejin.SaveSessionFunc转换为segmentfault.SaveSessionFunc
+			sfChecker := segmentfault.NewLoginChecker(originalURL, segmentfault.SaveSessionFunc(saveSession), articles)
+			sfChecker.CheckAndWaitForLogin(page)
 		// 其他平台可以在这里添加
 		// case "CSDN":
 		//     csdn.CheckAndWaitForLogin(page, originalURL, saveSession)

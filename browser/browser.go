@@ -16,6 +16,7 @@ import (
 	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
 	"github.com/auto-blog/platform"
+	"github.com/auto-blog/segmentfault"
 	"github.com/auto-blog/zhihu"
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
@@ -272,6 +273,8 @@ func (m *Manager) tryPublishArticleSync(platformName string, page playwright.Pag
 		return m.tryPublishToCnblogsSync(page)
 	case "知乎":
 		return m.tryPublishToZhihuSync(page)
+	case "SegmentFault":
+		return m.tryPublishToSegmentFaultSync(page)
 	default:
 		log.Printf("平台 %s 暂不支持直接发布", platformName)
 		return false
@@ -294,6 +297,8 @@ func (m *Manager) tryPublishArticle(platformName string, page playwright.Page, u
 		m.tryPublishToCnblogs(page)
 	case "知乎":
 		m.tryPublishToZhihu(page)
+	case "SegmentFault":
+		m.tryPublishToSegmentFault(page)
 	default:
 		log.Printf("平台 %s 暂不支持直接发布", platformName)
 	}
@@ -665,6 +670,8 @@ func (m *Manager) unifiedPublishFlow(platformPages map[string]playwright.Page) {
 			publishers[platformName] = cnblogs.NewPublisher(page)
 		case "知乎":
 			publishers[platformName] = zhihu.NewPublisher(page)
+		case "SegmentFault":
+			publishers[platformName] = segmentfault.NewPublisher(page)
 		default:
 			log.Printf("暂不支持的平台: %s", platformName)
 		}
@@ -704,6 +711,8 @@ func (m *Manager) waitForPlatformEditor(platformName string, page playwright.Pag
 		return m.waitForCnblogsEditor(page)
 	case "知乎":
 		return m.waitForZhihuEditor(page)
+	case "SegmentFault":
+		return m.waitForSegmentFaultEditor(page)
 	default:
 		return false
 	}
@@ -799,6 +808,14 @@ func (m *Manager) fillPlatformContent(platformName string, publisher interface{}
 				log.Printf("✅ %s 内容填写完成（待图片替换）", platformName)
 			}
 		}
+	case "SegmentFault":
+		if pub, ok := publisher.(*segmentfault.Publisher); ok {
+			if err := pub.PublishArticle(article); err != nil {
+				log.Printf("❌ %s 内容填写失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ %s 内容填写完成", platformName)
+			}
+		}
 	}
 }
 
@@ -857,9 +874,220 @@ func (m *Manager) replaceImageByIndex(platformName string, publisher interface{}
 				log.Printf("✅ [%s] 图片替换完成", platformName)
 			}
 		}
+	case "SegmentFault":
+		if pub, ok := publisher.(*segmentfault.Publisher); ok {
+			if err := pub.ReplaceTextWithImage(placeholder, image); err != nil {
+				log.Printf("❌ [%s] 图片替换失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ [%s] 图片替换完成", platformName)
+			}
+		}
 	default:
 		log.Printf("⚠️ [%s] 暂不支持图片替换", platformName)
 	}
+}
+
+// tryPublishToSegmentFault 尝试发布文章到SegmentFault
+func (m *Manager) tryPublishToSegmentFault(page playwright.Page) {
+	currentURL := page.URL()
+	
+	// 检查是否在登录页面
+	if strings.Contains(currentURL, "segmentfault.com/user/login") {
+		log.Println("🔐 检测到SegmentFault未登录，请在浏览器中完成登录")
+		
+		// 等待用户登录
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				currentURL = page.URL()
+				
+				// 检查是否已经离开登录页面
+				if !strings.Contains(currentURL, "segmentfault.com/user/login") {
+					log.Println("✅ SegmentFault登录成功")
+					
+					// 保存会话状态
+					if err := m.SaveSession(); err != nil {
+						log.Printf("⚠️ 登录成功后保存会话失败: %v", err)
+					} else {
+						log.Println("💾 登录成功，会话状态已保存")
+					}
+					
+					// 跳转到写作页面
+					if _, err := page.Goto(segmentfault.URL()); err != nil {
+						log.Printf("⚠️ 跳转到写作页面失败: %v", err)
+						return
+					}
+					
+					// 登录成功后发布文章
+					if len(m.articles) > 0 {
+						publisher := segmentfault.NewPublisher(page)
+						if err := publisher.WaitForEditor(); err != nil {
+							log.Printf("❌ 等待编辑器失败: %v", err)
+							return
+						}
+						
+						article := m.articles[0]
+						if err := publisher.PublishArticle(article); err != nil {
+							log.Printf("❌ 发布失败: %v", err)
+						} else {
+							log.Printf("🎉 文章《%s》已发布到SegmentFault", article.Title)
+						}
+					}
+					return
+				}
+			}
+		}
+	}
+}
+
+// tryPublishToSegmentFaultSync 同步尝试发布文章到SegmentFault
+func (m *Manager) tryPublishToSegmentFaultSync(page playwright.Page) bool {
+	currentURL := page.URL()
+	
+	// 检查是否在登录页面
+	if strings.Contains(currentURL, "segmentfault.com/user/login") {
+		log.Println("🔐 检测到SegmentFault未登录，请在浏览器中完成登录")
+		
+		// 等待用户登录
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				currentURL = page.URL()
+				
+				// 检查是否已经离开登录页面
+				if !strings.Contains(currentURL, "segmentfault.com/user/login") {
+					log.Println("✅ SegmentFault登录成功")
+					
+					// 保存会话状态
+					if err := m.SaveSession(); err != nil {
+						log.Printf("⚠️ 登录成功后保存会话失败: %v", err)
+					} else {
+						log.Println("💾 登录成功，会话状态已保存")
+					}
+					
+					// 跳转到写作页面
+					if _, err := page.Goto(segmentfault.URL()); err != nil {
+						log.Printf("⚠️ 跳转到写作页面失败: %v", err)
+						return false
+					}
+					
+					// 登录成功后发布文章
+					if len(m.articles) > 0 {
+						publisher := segmentfault.NewPublisher(page)
+						if err := publisher.WaitForEditor(); err != nil {
+							log.Printf("❌ 等待编辑器失败: %v", err)
+							return false
+						}
+						
+						article := m.articles[0]
+						if err := publisher.PublishArticle(article); err != nil {
+							log.Printf("❌ 发布失败: %v", err)
+							return false
+						}
+						
+						log.Printf("🎉 文章《%s》已发布到SegmentFault", article.Title)
+					}
+					return true
+				}
+			}
+		}
+	}
+	
+	return false
+}
+
+// waitForSegmentFaultEditor 等待SegmentFault编辑器
+func (m *Manager) waitForSegmentFaultEditor(page playwright.Page) bool {
+	currentURL := page.URL()
+	log.Printf("[SegmentFault] 当前页面URL: %s", currentURL)
+	
+	// 检查是否在登录页面，如果是则等待用户登录
+	if strings.Contains(currentURL, "segmentfault.com/user/login") {
+		log.Println("[SegmentFault] 🔐 检测到SegmentFault未登录，请在浏览器中完成登录")
+		
+		// 循环等待用户登录
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				// 实时获取当前URL
+				currentURL = page.URL()
+				log.Printf("[SegmentFault] 检测URL变化: %s", currentURL)
+				
+				// 检查是否已经跳转离开登录页面
+				if !strings.Contains(currentURL, "segmentfault.com/user/login") {
+					log.Println("[SegmentFault] ✅ 检测到已离开登录页面")
+					
+					// 保存会话状态
+					if err := m.SaveSession(); err != nil {
+						log.Printf("[SegmentFault] ⚠️ 保存会话失败: %v", err)
+					} else {
+						log.Println("[SegmentFault] 💾 会话状态已保存")
+					}
+					
+					// 跳出循环，继续执行编辑器检测
+					goto continueEditorCheck
+				}
+			}
+		}
+	}
+	
+continueEditorCheck:
+	// 重新获取当前URL（可能在登录后有变化）
+	currentURL = page.URL()
+	log.Printf("[SegmentFault] 继续检测编辑器，当前URL: %s", currentURL)
+	
+	// 检查是否在写作页面，如果不是则跳转
+	if !strings.Contains(currentURL, "segmentfault.com/write") {
+		log.Printf("[SegmentFault] 当前不在写作页面，跳转到: %s", segmentfault.URL())
+		
+		if _, err := page.Goto(segmentfault.URL()); err != nil {
+			log.Printf("[SegmentFault] ❌ 跳转到写作页面失败: %v", err)
+			return false
+		}
+		
+		// 等待页面加载
+		time.Sleep(2 * time.Second)
+		currentURL = page.URL()
+		log.Printf("[SegmentFault] 跳转后URL: %s", currentURL)
+	}
+	
+	log.Println("[SegmentFault] 开始等待编辑器元素...")
+	
+	titleLocator := page.Locator("input[placeholder*='标题']")
+	editorLocator := page.Locator(".CodeMirror")
+	
+	log.Println("[SegmentFault] 等待标题输入框...")
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(10000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("[SegmentFault] ❌ 等待标题输入框失败: %v", err)
+		return false
+	}
+	log.Println("[SegmentFault] ✅ 标题输入框已就绪")
+	
+	log.Println("[SegmentFault] 等待编辑器...")
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(10000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		log.Printf("[SegmentFault] ❌ 等待编辑器失败: %v", err)
+		return false
+	}
+	
+	log.Println("[SegmentFault] ✅ 编辑器已就绪")
+	return true
 }
 
 // Close 关闭浏览器和Playwright
