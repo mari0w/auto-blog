@@ -69,35 +69,21 @@ func (p *Publisher) fillTitle(title string) error {
 	return nil
 }
 
-// fillContent 填写文章正文（支持图片）
+// fillContent 填写文章正文（使用统一方法）
 func (p *Publisher) fillContent(art *article.Article) error {
-	// 等待编辑器出现并可见
-	editorLocator := p.page.Locator("#md-editor")
-	
-	if err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
-		Timeout: playwright.Float(10000), // 10秒超时
-		State:   playwright.WaitForSelectorStateVisible,
-	}); err != nil {
-		return fmt.Errorf("等待编辑器超时: %v", err)
+	// 使用统一的富文本处理器
+	config := common.RichContentConfig{
+		PlatformName:        "博客园",
+		EditorSelector:      "#md-editor",              // markdown编辑器
+		TitleSelector:       "",                       // 标题已在fillTitle中处理
+		UseMarkdownMode:     false,                    // 博客园不需要markdown解析对话框
+		ParseButtonCheck:    "",
+		InputMethod:         common.InputMethodType,   // 博客园使用打字输入方式
+		SkipImageReplacement: true,                    // 跳过图片替换，统一在混合模式中处理
 	}
 	
-	// 点击编辑器获取焦点
-	if err := editorLocator.Click(); err != nil {
-		return fmt.Errorf("点击编辑器失败: %v", err)
-	}
-	
-	// 等待获取焦点
-	time.Sleep(500 * time.Millisecond)
-	
-	// 博客园使用markdown编辑器，innerHTML方式可能不起作用，回退到传统方式
-	log.Printf("博客园使用专门的markdown编辑器处理")
-	if len(art.Images) > 0 {
-		log.Printf("检测到 %d 张图片，使用图片处理流程", len(art.Images))
-		return p.fillContentWithImages(art)
-	} else {
-		log.Println("无图片内容，使用快速输入")
-		return p.fillTextOnlyContent(art.Content)
-	}
+	handler := common.NewRichContentHandler(p.page, config)
+	return handler.FillContent(art)
 }
 
 // fillTextOnlyContent 填写纯文本内容（无图片）
@@ -260,6 +246,144 @@ func (p *Publisher) FindAndSelectText(text string) error {
 	
 	time.Sleep(200 * time.Millisecond)
 	return nil
+}
+
+// ReplaceTextWithImage 替换文本占位符为图片（博客园平台实现 - 统一复制粘贴方式）
+func (p *Publisher) ReplaceTextWithImage(placeholder string, img article.Image) error {
+	log.Printf("[博客园] 🔍 开始替换占位符: %s", placeholder)
+	
+	// 1. 使用JavaScript查找并选中占位符
+	jsCode := fmt.Sprintf(`
+		(function(searchText) {
+			const editor = document.querySelector('#md-editor');
+			if (!editor) return false;
+			
+			// 如果是textarea
+			if (editor.tagName.toLowerCase() === 'textarea') {
+				const content = editor.value;
+				const index = content.indexOf(searchText);
+				if (index !== -1) {
+					editor.focus();
+					editor.setSelectionRange(index, index + searchText.length);
+					return true;
+				}
+			}
+			
+			// 如果是CodeMirror
+			const cmElement = document.querySelector('#md-editor .CodeMirror');
+			if (cmElement && cmElement.CodeMirror) {
+				const cm = cmElement.CodeMirror;
+				const content = cm.getValue();
+				const index = content.indexOf(searchText);
+				if (index !== -1) {
+					const lines = content.substring(0, index).split('\n');
+					const line = lines.length - 1;
+					const ch = lines[lines.length - 1].length;
+					const from = {line: line, ch: ch};
+					const to = {line: line, ch: ch + searchText.length};
+					cm.setSelection(from, to);
+					cm.focus();
+					return true;
+				}
+			}
+			
+			return false;
+		})(%q)
+	`, placeholder)
+	
+	result, err := p.page.Evaluate(jsCode)
+	if err != nil {
+		return fmt.Errorf("查找占位符失败: %v", err)
+	}
+	
+	if found, ok := result.(bool); !ok || !found {
+		return fmt.Errorf("未找到占位符: %s", placeholder)
+	}
+	
+	log.Printf("[博客园] ✅ 找到占位符，先删除占位符")
+	
+	// 2. 删除选中的占位符
+	if err := p.page.Keyboard().Press("Delete"); err != nil {
+		return fmt.Errorf("删除占位符失败: %v", err)
+	}
+	
+	// 3. 使用统一的方法复制图片到剪贴板
+	if err := common.CopyImageToClipboard(p.page, img.AbsolutePath); err != nil {
+		return fmt.Errorf("复制图片失败: %v", err)
+	}
+	
+	// 4. 粘贴图片到编辑器
+	if err := common.PasteImageToEditor(p.page); err != nil {
+		return fmt.Errorf("粘贴图片失败: %v", err)
+	}
+	
+	// 5. 等待图片上传完成并在编辑器中显示
+	if err := p.waitForImageUploadComplete(); err != nil {
+		log.Printf("[博客园] ⚠️ 等待图片上传超时: %v", err)
+		// 不算致命错误，继续执行
+	}
+	
+	log.Printf("[博客园] ✅ 占位符 %s 替换完成", placeholder)
+	return nil
+}
+
+// waitForImageUploadComplete 等待图片上传完成并在编辑器中显示
+func (p *Publisher) waitForImageUploadComplete() error {
+	log.Printf("[博客园] 等待图片上传完成...")
+	
+	// 等待图片出现在编辑器中
+	for i := 0; i < 15; i++ { // 最多等待15秒
+		result, err := p.page.Evaluate(`
+			(function() {
+				// 检查markdown编辑器中是否有图片
+				const editor = document.querySelector('#md-editor');
+				if (editor) {
+					let content = '';
+					
+					// 如果是textarea
+					if (editor.tagName.toLowerCase() === 'textarea') {
+						content = editor.value;
+					} 
+					// 如果是CodeMirror
+					else {
+						const cmElement = document.querySelector('#md-editor .CodeMirror');
+						if (cmElement && cmElement.CodeMirror) {
+							content = cmElement.CodeMirror.getValue();
+						}
+					}
+					
+					// 检查是否包含图片markdown语法或HTML img标签
+					const hasImageMd = /!\[.*?\]\(.*?\)/.test(content);
+					const hasImageHtml = /<img[^>]*>/.test(content);
+					if (hasImageMd || hasImageHtml) {
+						return { success: true, type: hasImageMd ? 'markdown' : 'html' };
+					}
+				}
+				
+				// 也检查编辑器渲染区域是否有图片
+				const images = document.querySelectorAll('#md-editor img, .markdown-body img, .editor-preview img');
+				if (images.length > 0) {
+					return { success: true, type: 'rendered', count: images.length };
+				}
+				
+				return { success: false };
+			})()
+		`)
+		
+		if err != nil {
+			log.Printf("[博客园] 检查图片状态失败: %v", err)
+		} else if resultMap, ok := result.(map[string]interface{}); ok {
+			if success, _ := resultMap["success"].(bool); success {
+				imageType, _ := resultMap["type"].(string)
+				log.Printf("[博客园] ✅ 检测到图片已上传完成 (类型: %s)", imageType)
+				return nil
+			}
+		}
+		
+		time.Sleep(1 * time.Second)
+	}
+	
+	return fmt.Errorf("图片上传超时")
 }
 
 // WaitForEditor 等待编辑器加载完成

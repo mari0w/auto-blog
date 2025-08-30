@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/auto-blog/article"
+	"github.com/auto-blog/common"
 	"github.com/playwright-community/playwright-go"
 )
 
@@ -349,12 +350,66 @@ func (p *Publisher) prepareMixedContent(art *article.Article) (string, error) {
 	return result, nil
 }
 
-// fillContent 填写文章正文（支持图片）
+// fillContent 填写文章正文（使用统一方法）
 func (p *Publisher) fillContent(art *article.Article) error {
-	log.Printf("[知乎] 开始填写文章正文，共 %d 行", len(art.Content))
+	// 使用统一的富文本处理器
+	config := common.RichContentConfig{
+		PlatformName:        "知乎",
+		EditorSelector:      "div.Editable-content",
+		TitleSelector:       "",                        // 标题已在fillTitle中处理
+		UseMarkdownMode:     true,                      // 知乎需要markdown解析
+		ParseButtonCheck:    "",
+		InputMethod:         common.InputMethodPaste,   // 知乎使用粘贴输入方式
+		SkipImageReplacement: true,                     // 跳过图片替换，在混合模式中统一处理
+	}
+	
+	handler := common.NewRichContentHandler(p.page, config)
+	
+	// 在混合模式下，只填写带占位符的内容，不进行图片替换
+	// 图片替换将在统一的串行替换阶段进行
+	return handler.FillContent(art)
+}
 
-	// 使用新的统一流程
-	return p.fillContentWithUnifiedFlow(art)
+// fillContentWithUnifiedFlowAndImages 使用统一流程但保留知乎的图片替换逻辑
+func (p *Publisher) fillContentWithUnifiedFlowAndImages(handler *common.RichContentHandler, art *article.Article) error {
+	log.Printf("[知乎] 🚀 使用统一流程发布文章（含图片处理）")
+	
+	// Step 1-4: 使用统一方法处理基础流程（不包含图片替换）
+	markdownWithPlaceholders := handler.PrepareMarkdownWithPlaceholders(art)
+	log.Printf("[知乎] ✅ Step 1: 生成带占位符的Markdown内容，长度: %d", len(markdownWithPlaceholders))
+	
+	tempPage, err := handler.CreateAndLoadTempPage(markdownWithPlaceholders)
+	if err != nil {
+		return fmt.Errorf("创建临时页面失败: %v", err)
+	}
+	log.Printf("[知乎] ✅ Step 2: 临时窗口已创建并加载内容")
+	
+	time.Sleep(2 * time.Second)
+	
+	if err := handler.SelectAndCopyContent(tempPage); err != nil {
+		tempPage.Close()
+		return fmt.Errorf("复制内容失败: %v", err)
+	}
+	log.Printf("[知乎] ✅ Step 3: 内容已复制到剪贴板")
+	
+	tempPage.Close()
+	log.Printf("[知乎] 📄 临时页面已关闭")
+	
+	if err := handler.PasteToEditor(); err != nil {
+		return fmt.Errorf("粘贴内容失败: %v", err)
+	}
+	log.Printf("[知乎] ✅ Step 4: 内容已粘贴到知乎编辑器")
+	
+	// Step 5: 使用知乎专门的图片替换方法
+	log.Printf("[知乎] 🖼️ 开始替换 %d 个图片占位符", len(art.Images))
+	if err := p.replacePlaceholdersWithImages(art); err != nil {
+		log.Printf("[知乎] ⚠️ 图片替换失败: %v", err)
+	} else {
+		log.Printf("[知乎] ✅ Step 5: 图片替换完成")
+	}
+	
+	log.Printf("[知乎] 🎉 统一流程发布完成")
+	return nil
 }
 
 // fillContentWithUnifiedFlow 使用统一的流程处理文章发布
@@ -629,7 +684,7 @@ func (p *Publisher) replacePlaceholdersWithImages(art *article.Article) error {
 		log.Printf("[知乎] 🔍 查找并替换占位符: %s", placeholder)
 		
 		// 方法1: 使用JavaScript直接查找和替换
-		if err := p.replaceTextWithImage(placeholder, img); err != nil {
+		if err := p.ReplaceTextWithImage(placeholder, img); err != nil {
 			log.Printf("[知乎] ⚠️ 方法1失败，尝试方法2: %v", err)
 			
 			// 方法2: 使用浏览器查找功能
@@ -647,7 +702,7 @@ func (p *Publisher) replacePlaceholdersWithImages(art *article.Article) error {
 }
 
 // replaceTextWithImage 使用JavaScript查找并替换文本为图片
-func (p *Publisher) replaceTextWithImage(placeholder string, img article.Image) error {
+func (p *Publisher) ReplaceTextWithImage(placeholder string, img article.Image) error {
 	// 使用更精确的查找方法
 	result, err := p.page.Evaluate(fmt.Sprintf(`
 		(function() {
@@ -777,18 +832,27 @@ func (p *Publisher) replaceTextWithImage(placeholder string, img article.Image) 
 	// 等待一下确保选择稳定
 	time.Sleep(500 * time.Millisecond)
 	
-	// 复制图片到剪贴板
-	if err := p.copyImageToClipboard(img.AbsolutePath); err != nil {
+	log.Printf("[知乎] ✅ 找到占位符，先删除占位符")
+	
+	// 2. 删除选中的占位符
+	if err := p.page.Keyboard().Press("Delete"); err != nil {
+		return fmt.Errorf("删除占位符失败: %v", err)
+	}
+	
+	// 3. 使用统一的方法复制图片到剪贴板
+	if err := common.CopyImageToClipboard(p.page, img.AbsolutePath); err != nil {
 		return fmt.Errorf("复制图片失败: %v", err)
 	}
 	
-	time.Sleep(500 * time.Millisecond)
+	// 4. 粘贴图片到编辑器
+	if err := common.PasteImageToEditor(p.page); err != nil {
+		return fmt.Errorf("粘贴图片失败: %v", err)
+	}
 	
-	// 粘贴图片（会自动替换选中的文本）
-	if err := p.page.Keyboard().Press("Meta+v"); err != nil {
-		if err := p.page.Keyboard().Press("Control+v"); err != nil {
-			return fmt.Errorf("粘贴图片失败: %v", err)
-		}
+	// 等待图片上传完成并在编辑器中显示
+	if err := p.waitForImageUploadComplete(); err != nil {
+		log.Printf("[知乎] ⚠️ 等待图片上传超时: %v", err)
+		// 不算致命错误，继续执行
 	}
 	
 	return nil
@@ -3010,4 +3074,55 @@ func (p *Publisher) copyImageToClipboard(imagePath string) error {
 	time.Sleep(500 * time.Millisecond)
 	
 	return nil
+}
+
+// waitForImageUploadComplete 等待图片上传完成并在编辑器中显示
+func (p *Publisher) waitForImageUploadComplete() error {
+	log.Printf("[知乎] 等待图片上传完成...")
+	
+	// 等待图片出现在编辑器中
+	for i := 0; i < 10; i++ { // 最多等待10秒
+		result, err := p.page.Evaluate(`
+			(function() {
+				// 检查知乎编辑器中是否有图片
+				const editor = document.querySelector('div.Editable-content');
+				if (editor) {
+					// 检查是否有img标签
+					const images = editor.querySelectorAll('img');
+					if (images.length > 0) {
+						// 检查图片是否加载完成
+						let loadedCount = 0;
+						for (let img of images) {
+							if (img.complete && img.naturalWidth > 0) {
+								loadedCount++;
+							}
+						}
+						return { 
+							success: loadedCount > 0, 
+							type: 'rendered', 
+							total: images.length,
+							loaded: loadedCount 
+						};
+					}
+				}
+				
+				return { success: false };
+			})()
+		`)
+		
+		if err != nil {
+			log.Printf("[知乎] 检查图片状态失败: %v", err)
+		} else if resultMap, ok := result.(map[string]interface{}); ok {
+			if success, _ := resultMap["success"].(bool); success {
+				total, _ := resultMap["total"].(float64)
+				loaded, _ := resultMap["loaded"].(float64)
+				log.Printf("[知乎] ✅ 检测到图片已上传完成 (总数: %.0f, 已加载: %.0f)", total, loaded)
+				return nil
+			}
+		}
+		
+		time.Sleep(1 * time.Second)
+	}
+	
+	return fmt.Errorf("图片上传超时")
 }

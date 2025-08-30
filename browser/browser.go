@@ -2,6 +2,7 @@ package browser
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -124,42 +125,36 @@ func NewManager(userDataDir string, articles []*article.Article) (*Manager, erro
 	return manager, nil
 }
 
-// OpenPlatforms 串行打开并发布到多个平台
+// OpenPlatforms 并行打开平台，然后统一发布内容
 func (m *Manager) OpenPlatforms(platforms map[string]string) {
-	log.Printf("开始串行处理 %d 个平台", len(platforms))
+	log.Printf("开始并行打开 %d 个平台", len(platforms))
 	
-	// 按顺序处理每个平台
-	platformOrder := []string{"知乎", "掘金", "博客园"} // 定义平台处理顺序
+	// 存储平台页面信息
+	platformPages := make(map[string]playwright.Page)
+	var wg sync.WaitGroup
+	var mutex sync.Mutex
 	
-	for _, platformName := range platformOrder {
-		if url, exists := platforms[platformName]; exists {
-			log.Printf("\n========== 开始处理平台: %s ==========", platformName)
-			m.openAndPublishToPlatform(platformName, url)
-			log.Printf("========== 平台 %s 处理完成 ==========\n", platformName)
-			
-			// 平台之间稍作等待，确保剪贴板操作不冲突
-			time.Sleep(2 * time.Second)
-		}
-	}
-	
-	// 处理其他未在顺序列表中的平台
-	for platformName, url := range platforms {
-		found := false
-		for _, orderedName := range platformOrder {
-			if platformName == orderedName {
-				found = true
-				break
+	// 并行打开所有平台
+	for platform, url := range platforms {
+		wg.Add(1)
+		go func(platformName, platformURL string) {
+			defer wg.Done()
+			page := m.openPlatform(platformName, platformURL)
+			if page != nil {
+				mutex.Lock()
+				platformPages[platformName] = page
+				mutex.Unlock()
 			}
-		}
-		if !found {
-			log.Printf("\n========== 开始处理平台: %s ==========", platformName)
-			m.openAndPublishToPlatform(platformName, url)
-			log.Printf("========== 平台 %s 处理完成 ==========\n", platformName)
-			time.Sleep(2 * time.Second)
-		}
+		}(platform, url)
 	}
 	
-	log.Println("所有平台处理完成")
+	wg.Wait()
+	log.Printf("所有 %d 个平台已打开", len(platformPages))
+	
+	// 统一发布流程
+	if len(m.articles) > 0 {
+		m.unifiedPublishFlow(platformPages)
+	}
 }
 
 // openAndPublishToPlatform 同步打开平台并发布文章
@@ -205,12 +200,12 @@ func (m *Manager) openAndPublishToPlatform(platformName, url string) {
 	}
 }
 
-// openPlatform 在新页面中打开指定平台（保留原方法但不再使用）
-func (m *Manager) openPlatform(platformName, url string) {
+// openPlatform 在新页面中打开指定平台并返回页面对象
+func (m *Manager) openPlatform(platformName, url string) playwright.Page {
 	page, err := m.context.NewPage()
 	if err != nil {
 		log.Printf("无法为 %s 创建新页面: %v", platformName, err)
-		return
+		return nil
 	}
 
 	// 注入stealth脚本，防止被检测为自动化浏览器
@@ -224,7 +219,7 @@ func (m *Manager) openPlatform(platformName, url string) {
 	_, err = page.Goto(url)
 	if err != nil {
 		log.Printf("无法打开 %s (%s): %v", platformName, url, err)
-		return
+		return nil
 	}
 
 	log.Printf("已打开 %s: %s", platformName, url)
@@ -234,14 +229,7 @@ func (m *Manager) openPlatform(platformName, url string) {
 		State: playwright.LoadStateNetworkidle,
 	})
 
-	// 异步处理登录检测和文章发布
-	go func() {
-		// 首先尝试直接发布文章（如果已登录）
-		m.tryPublishArticle(platformName, page, url)
-		
-		// 然后检查是否需要登录
-		m.platformManager.CheckAndWaitForLogin(platformName, page, url, m.SaveSession, m.articles)
-	}()
+	return page
 }
 
 // WaitForExit 等待用户退出信号并优雅关闭
@@ -637,6 +625,241 @@ func (m *Manager) SaveSession() error {
 		return err
 	}
 	return nil
+}
+
+// unifiedPublishFlow 统一发布流程：混合模式（并行平台打开 + 串行图片替换）
+func (m *Manager) unifiedPublishFlow(platformPages map[string]playwright.Page) {
+	if len(m.articles) == 0 {
+		log.Println("没有文章需要发布")
+		return
+	}
+	
+	article := m.articles[0]
+	log.Printf("开始统一发布文章: %s", article.Title)
+	
+	// 1. 等待所有平台编辑器就绪
+	validPages := make(map[string]playwright.Page)
+	for platformName, page := range platformPages {
+		if page != nil {
+			if m.waitForPlatformEditor(platformName, page) {
+				validPages[platformName] = page
+				log.Printf("✅ %s 编辑器就绪", platformName)
+			} else {
+				log.Printf("⚠️ %s 编辑器未就绪，跳过", platformName)
+			}
+		}
+	}
+	
+	if len(validPages) == 0 {
+		log.Println("没有有效的平台页面")
+		return
+	}
+	
+	// 2. 创建平台发布器
+	publishers := make(map[string]interface{})
+	for platformName, page := range validPages {
+		switch platformName {
+		case "掘金":
+			publishers[platformName] = juejin.NewPublisher(page)
+		case "博客园":
+			publishers[platformName] = cnblogs.NewPublisher(page)
+		case "知乎":
+			publishers[platformName] = zhihu.NewPublisher(page)
+		default:
+			log.Printf("暂不支持的平台: %s", platformName)
+		}
+	}
+	
+	// 3. 并行填写标题和内容（不包含图片替换）
+	var wg sync.WaitGroup
+	for platformName, publisher := range publishers {
+		wg.Add(1)
+		go func(name string, pub interface{}) {
+			defer wg.Done()
+			m.fillPlatformContent(name, pub, article)
+		}(platformName, publisher)
+	}
+	wg.Wait()
+	
+	// 4. 如果有图片，按图片顺序进行并行替换（每张图片所有平台并行，但图片间串行）
+	if len(article.Images) > 0 {
+		log.Printf("开始按顺序替换 %d 张图片", len(article.Images))
+		for imageIndex := 0; imageIndex < len(article.Images); imageIndex++ {
+			log.Printf("🖼️ 开始并行替换第 %d 张图片到所有平台", imageIndex+1)
+			m.replaceImageInAllPlatforms(publishers, article, imageIndex)
+			// 等待一段时间再处理下一张图片，确保剪贴板操作不冲突
+			time.Sleep(2 * time.Second)
+		}
+	}
+	
+	log.Printf("🎉 文章《%s》统一发布完成", article.Title)
+}
+
+// waitForPlatformEditor 等待平台编辑器就绪
+func (m *Manager) waitForPlatformEditor(platformName string, page playwright.Page) bool {
+	switch platformName {
+	case "掘金":
+		return m.waitForJuejinEditor(page)
+	case "博客园":
+		return m.waitForCnblogsEditor(page)
+	case "知乎":
+		return m.waitForZhihuEditor(page)
+	default:
+		return false
+	}
+}
+
+// waitForJuejinEditor 等待掘金编辑器
+func (m *Manager) waitForJuejinEditor(page playwright.Page) bool {
+	titleLocator := page.Locator("input.title-input")
+	editorLocator := page.Locator("div.CodeMirror-scroll")
+	
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	return err == nil
+}
+
+// waitForCnblogsEditor 等待博客园编辑器
+func (m *Manager) waitForCnblogsEditor(page playwright.Page) bool {
+	titleLocator := page.Locator("#post-title")
+	editorLocator := page.Locator("#md-editor")
+	
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	return err == nil
+}
+
+// waitForZhihuEditor 等待知乎编辑器
+func (m *Manager) waitForZhihuEditor(page playwright.Page) bool {
+	titleLocator := page.Locator("textarea.Input")
+	editorLocator := page.Locator("div.Editable-content")
+	
+	err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	if err != nil {
+		return false
+	}
+	
+	err = editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+		Timeout: playwright.Float(5000),
+		State:   playwright.WaitForSelectorStateVisible,
+	})
+	return err == nil
+}
+
+// fillPlatformContent 给平台填写内容（根据平台特性处理图片）
+func (m *Manager) fillPlatformContent(platformName string, publisher interface{}, article *article.Article) {
+	log.Printf("开始为 %s 填写内容", platformName)
+	
+	switch platformName {
+	case "掘金":
+		if pub, ok := publisher.(*juejin.Publisher); ok {
+			if err := pub.PublishArticle(article); err != nil {
+				log.Printf("❌ %s 内容填写失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ %s 内容填写完成", platformName)
+			}
+		}
+	case "博客园":
+		if pub, ok := publisher.(*cnblogs.Publisher); ok {
+			if err := pub.PublishArticle(article); err != nil {
+				log.Printf("❌ %s 内容填写失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ %s 内容填写完成", platformName)
+			}
+		}
+	case "知乎":
+		if pub, ok := publisher.(*zhihu.Publisher); ok {
+			// 知乎也直接调用PublishArticle，但知乎内部会使用占位符方式
+			if err := pub.PublishArticle(article); err != nil {
+				log.Printf("❌ %s 内容填写失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ %s 内容填写完成（待图片替换）", platformName)
+			}
+		}
+	}
+}
+
+
+// replaceImageInAllPlatforms 在所有平台并行替换指定索引的图片
+func (m *Manager) replaceImageInAllPlatforms(publishers map[string]interface{}, article *article.Article, imageIndex int) {
+	if imageIndex >= len(article.Images) {
+		return
+	}
+	
+	image := article.Images[imageIndex]
+	placeholder := fmt.Sprintf("IMAGE_PLACEHOLDER_%d", imageIndex)
+	
+	var wg sync.WaitGroup
+	
+	// 为每个平台启动一个goroutine进行图片替换
+	for platformName, publisher := range publishers {
+		wg.Add(1)
+		go func(name string, pub interface{}) {
+			defer wg.Done()
+			m.replaceImageByIndex(name, pub, placeholder, image)
+		}(platformName, publisher)
+	}
+	
+	// 等待所有平台完成当前图片的替换
+	wg.Wait()
+	log.Printf("✅ 第 %d 张图片已在所有平台替换完成", imageIndex+1)
+}
+
+// replaceImageByIndex 在指定平台替换占位符为图片
+func (m *Manager) replaceImageByIndex(platformName string, publisher interface{}, placeholder string, image article.Image) {
+	log.Printf("[%s] 🔍 开始替换占位符: %s", platformName, placeholder)
+	
+	switch platformName {
+	case "掘金":
+		if pub, ok := publisher.(*juejin.Publisher); ok {
+			if err := pub.ReplaceTextWithImage(placeholder, image); err != nil {
+				log.Printf("❌ [%s] 图片替换失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ [%s] 图片替换完成", platformName)
+			}
+		}
+	case "博客园":
+		if pub, ok := publisher.(*cnblogs.Publisher); ok {
+			if err := pub.ReplaceTextWithImage(placeholder, image); err != nil {
+				log.Printf("❌ [%s] 图片替换失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ [%s] 图片替换完成", platformName)
+			}
+		}
+	case "知乎":
+		if pub, ok := publisher.(*zhihu.Publisher); ok {
+			if err := pub.ReplaceTextWithImage(placeholder, image); err != nil {
+				log.Printf("❌ [%s] 图片替换失败: %v", platformName, err)
+			} else {
+				log.Printf("✅ [%s] 图片替换完成", platformName)
+			}
+		}
+	default:
+		log.Printf("⚠️ [%s] 暂不支持图片替换", platformName)
+	}
 }
 
 // Close 关闭浏览器和Playwright
