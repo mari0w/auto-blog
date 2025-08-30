@@ -15,6 +15,7 @@ import (
 	"github.com/auto-blog/cnblogs"
 	"github.com/auto-blog/juejin"
 	"github.com/auto-blog/platform"
+	"github.com/auto-blog/zhihu"
 	"github.com/jonfriesen/playwright-go-stealth"
 	"github.com/playwright-community/playwright-go"
 )
@@ -78,8 +79,8 @@ func NewManager(userDataDir string, articles []*article.Article) (*Manager, erro
 		TimezoneId: playwright.String("Asia/Shanghai"),
 		// 启用JavaScript
 		JavaScriptEnabled: playwright.Bool(true),
-		// 设置权限
-		Permissions: []string{"geolocation", "notifications"},
+		// 设置权限，包括剪贴板权限
+		Permissions: []string{"geolocation", "notifications", "clipboard-read", "clipboard-write"},
 	}
 
 	// 如果存在会话状态文件，则加载它
@@ -214,6 +215,8 @@ func (m *Manager) tryPublishArticle(platformName string, page playwright.Page, u
 		m.tryPublishToJuejin(page)
 	case "博客园":
 		m.tryPublishToCnblogs(page)
+	case "知乎":
+		m.tryPublishToZhihu(page)
 	default:
 		log.Printf("平台 %s 暂不支持直接发布", platformName)
 	}
@@ -321,6 +324,60 @@ func (m *Manager) tryPublishToCnblogs(page playwright.Page) {
 			log.Printf("❌ 直接发布失败: %v", err)
 		} else {
 			log.Printf("🎉 文章《%s》已成功发布到博客园", article.Title)
+		}
+	} else {
+		log.Println("编辑器尚未就绪，将等待登录检测")
+	}
+}
+
+// tryPublishToZhihu 尝试发布文章到知乎
+func (m *Manager) tryPublishToZhihu(page playwright.Page) {
+	// 检查是否已经在编辑器页面
+	currentURL := page.URL()
+	if !strings.Contains(currentURL, "zhuanlan.zhihu.com/write") {
+		log.Printf("当前页面不是知乎编辑器，跳过直接发布")
+		return
+	}
+	
+	// 快速检查编辑器元素是否存在
+	titleLocator := page.Locator("textarea.Input")
+	editorLocator := page.Locator("div.Editable-content")
+	
+	// 等待编辑器元素，但使用较短的超时时间
+	titleVisible := make(chan bool, 1)
+	editorVisible := make(chan bool, 1)
+	
+	go func() {
+		err := titleLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(2000), // 2秒超时
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		titleVisible <- (err == nil)
+	}()
+	
+	go func() {
+		err := editorLocator.WaitFor(playwright.LocatorWaitForOptions{
+			Timeout: playwright.Float(2000), // 2秒超时
+			State:   playwright.WaitForSelectorStateVisible,
+		})
+		editorVisible <- (err == nil)
+	}()
+	
+	// 等待两个检查完成
+	titleReady := <-titleVisible
+	editorReady := <-editorVisible
+	
+	if titleReady && editorReady {
+		log.Println("✅ 检测到知乎编辑器已就绪，开始发布文章")
+		
+		// 创建发布器并发布第一篇文章
+		publisher := zhihu.NewPublisher(page)
+		article := m.articles[0]
+		
+		if err := publisher.PublishArticle(article); err != nil {
+			log.Printf("❌ 直接发布失败: %v", err)
+		} else {
+			log.Printf("🎉 文章《%s》已成功发布到知乎", article.Title)
 		}
 	} else {
 		log.Println("编辑器尚未就绪，将等待登录检测")

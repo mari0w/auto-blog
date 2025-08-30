@@ -89,12 +89,12 @@ func (p *Publisher) fillContent(art *article.Article) error {
 	// 等待获取焦点
 	time.Sleep(500 * time.Millisecond)
 	
-	// 检查是否有图片需要处理
+	// 博客园使用markdown编辑器，innerHTML方式可能不起作用，回退到传统方式
+	log.Printf("博客园使用专门的markdown编辑器处理")
 	if len(art.Images) > 0 {
 		log.Printf("检测到 %d 张图片，使用图片处理流程", len(art.Images))
 		return p.fillContentWithImages(art)
 	} else {
-		// 没有图片，使用快速文本输入
 		log.Println("无图片内容，使用快速输入")
 		return p.fillTextOnlyContent(art.Content)
 	}

@@ -3,7 +3,7 @@ Go语言中的并发编程最佳实践
 
 Go语言以其出色的并发特性而闻名，通过goroutines和channels提供了强大的并发编程能力。本文将深入探讨Go语言中的并发编程最佳实践。
 
-![Go语言并发架构图](./images/go-concurrency-architecture.png)
+![Go语言并发架构图](/Users/charles/auto-blog/articles/images/go-concurrency-architecture.png)
 
 ## 什么是Goroutine
 

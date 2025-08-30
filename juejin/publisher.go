@@ -101,12 +101,12 @@ func (p *Publisher) fillContent(art *article.Article) error {
 		return fmt.Errorf("删除内容失败: %v", err)
 	}
 	
-	// 检查是否有图片需要处理
+	// 掘金使用CodeMirror编辑器，innerHTML方式可能不起作用，回退到传统方式
+	log.Printf("掘金使用专门的CodeMirror处理")
 	if len(art.Images) > 0 {
 		log.Printf("检测到 %d 张图片，使用图片处理流程", len(art.Images))
 		return p.fillContentWithImages(art)
 	} else {
-		// 没有图片，使用快速文本输入
 		log.Println("无图片内容，使用快速输入")
 		return p.fillTextOnlyContent(art.Content)
 	}
